@@ -1,0 +1,7 @@
+pandas
+numpy
+holidays
+google-cloud-bigquery
+pandas-gbq
+google-auth
+db-dtypes
