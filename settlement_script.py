@@ -1,26 +1,30 @@
 # ==============================================================================
 # SCRIPT SETTLEMENT MASTER - VERSION 15.6 (FINAL: HOLIDAY LOGIC & NOT MATCH)
 # ==============================================================================
-!pip install holidays gspread-dataframe -q
-
+import os
+import json
 import pandas as pd
 import numpy as np
 import holidays
 from datetime import timedelta, datetime, time as dtime
-from google.colab import auth
 from google.cloud import bigquery
-import gspread
-from gspread_dataframe import set_with_dataframe
-from google.auth import default
+from google.oauth2 import service_account
 
 pd.set_option('future.no_silent_downcasting', True)
 
-print("⏳ Melakukan otentikasi...")
-auth.authenticate_user()
-creds, _ = default()
-gc = gspread.authorize(creds)
+print("⏳ Melakukan otentikasi GCP dari GitHub Secrets...")
 PROJECT_ID = 'youtap-indonesia-bi'
-client = bigquery.Client(project=PROJECT_ID)
+
+# Membaca Service Account JSON dari file YAML GitHub Actions Bapak
+gcp_creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+
+if not gcp_creds_json:
+    raise ValueError("❌ Error: Rahasia GOOGLE_CREDENTIALS tidak ditemukan di GitHub Secrets!")
+
+creds_dict = json.loads(gcp_creds_json)
+credentials = service_account.Credentials.from_service_account_info(creds_dict)
+client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
+
 print("✅ Otentikasi Berhasil!")
 
 # ==============================================================================
