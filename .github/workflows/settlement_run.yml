@@ -2,11 +2,9 @@ name: Automated Settlement Master V15.6
 
 on:
   schedule:
-    # 08:15 WIB = 01:15 UTC
-    # 09:15 WIB = 02:15 UTC
-    # 10:15 WIB = 03:15 UTC
-    - cron: '15 1,2,3 * * *'
-  workflow_dispatch: # Memungkinkan klik tombol "Run" manual di GitHub
+    # Berjalan jam 01:15 UTC (08:15 WIB) dan 02:15 UTC (09:15 WIB) setiap hari
+    - cron: '15 1,2 * * *'
+  workflow_dispatch: # Tombol manual agar Bapak bisa langsung test run
 
 jobs:
   build:
@@ -18,10 +16,10 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # ⬆️ Diubah ke 3.11 untuk menghilangkan warning Google
+          python-version: '3.11'
 
       - name: Autentikasi ke Google Cloud
-        uses: google-github-actions/auth@v2 # 🔑 Action resmi Google untuk menangani login otomatis
+        uses: google-github-actions/auth@v2
         with:
           credentials_json: '${{ secrets.GOOGLE_CREDENTIALS }}'
 
@@ -31,4 +29,4 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Settlement Script
-        run: python settlement_script.py
+        run: python main.py
