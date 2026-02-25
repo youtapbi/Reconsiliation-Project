@@ -1,7 +1,6 @@
-pandas
+pandas==2.2.0
 numpy
 holidays
 google-cloud-bigquery
-pandas-gbq
 google-auth
 db-dtypes
