@@ -1,31 +1,15 @@
-# ==============================================================================
-# SCRIPT SETTLEMENT MASTER - VERSION 15.6 (FINAL: HOLIDAY LOGIC & NOT MATCH)
-# ==============================================================================
-import os
-import json
 import pandas as pd
 import numpy as np
 import holidays
 from datetime import timedelta, datetime, time as dtime
 from google.cloud import bigquery
-from google.oauth2 import service_account
+import os
 
 pd.set_option('future.no_silent_downcasting', True)
 
-print("⏳ Melakukan otentikasi GCP dari GitHub Secrets...")
+print("⏳ Memulai Proses Settlement Otomatis...")
 PROJECT_ID = 'youtap-indonesia-bi'
-
-# Membaca Service Account JSON dari file YAML GitHub Actions Bapak
-gcp_creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-
-if not gcp_creds_json:
-    raise ValueError("❌ Error: Rahasia GOOGLE_CREDENTIALS tidak ditemukan di GitHub Secrets!")
-
-creds_dict = json.loads(gcp_creds_json)
-credentials = service_account.Credentials.from_service_account_info(creds_dict)
-client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
-
-print("✅ Otentikasi Berhasil!")
+client = bigquery.Client(project=PROJECT_ID)
 
 # ==============================================================================
 # STEP 1: DAFTAR HARI LIBUR NASIONAL 2026
@@ -274,7 +258,6 @@ class YoutapSettlementEngine:
         return True
 
     def _get_last_working_day(self, current_date):
-        """Mencari hari kerja (bukan weekend/libur) terakhir sebelum current_date"""
         prev_date = current_date - timedelta(days=1)
         while not self._is_settlement_day(prev_date):
             prev_date -= timedelta(days=1)
@@ -295,9 +278,6 @@ class YoutapSettlementEngine:
             (df_base['REFERRAL_CODE_ACQUISITION'].isna())
         ].copy()
 
-        # ======================================================================
-        # PENGELOLAAN DATA NOT MATCH DARI TRX YANG KEY_JOIN_ISSUER-NYA NULL
-        # ======================================================================
         df_unmatched = df_base[df_base['KEY_JOIN_ISSUER'].isna()].copy()
         
         df_unmatched['AMOUNT_BASE'] = pd.to_numeric(df_unmatched['AMOUNT_BASE'], errors='coerce').fillna(0.0)
@@ -318,7 +298,6 @@ class YoutapSettlementEngine:
         ).reset_index()
         not_match_agg['TOTAL_MDR_NOT_MATCH'] = not_match_agg['TOTAL_MDR_NOT_MATCH'].round()
         not_match_agg['TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH'] = not_match_agg['TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH'].round()
-        # ======================================================================
         
         df_base = df_base[df_base['KEY_JOIN_ISSUER'].notna()].copy()
 
@@ -367,9 +346,6 @@ class YoutapSettlementEngine:
         df_ft = df_first_trx[['ACCOUNT_ID','FT_TRX_DATE','AMOUNT']].copy()
         df_ft = df_ft.rename(columns={'AMOUNT': 'FIRST_TRX'})
 
-        # ======================================================================
-        # LOGIKA DINAMIS: TRX_00 PADA HARI KERJA TERAKHIR SEBELUM LIBUR
-        # ======================================================================
         df_trx_holiday = df_base[
             (df_base['TXN_TIME_WIB'] <= dtime(0, 1, 0))
         ].copy()
@@ -382,7 +358,6 @@ class YoutapSettlementEngine:
         df_trx_holiday = df_trx_holiday[df_trx_holiday['TRX_DATE_ONLY'].isin(holiday_carry_dates)]
         df_trx_holiday = df_trx_holiday.groupby(['ACCOUNT_ID','TRX_DATE_ONLY'])['AMOUNT_BASE'].sum().reset_index()
         df_trx_holiday = df_trx_holiday.rename(columns={'AMOUNT_BASE': 'TRX_HOLIDAY_CARRY_AMT'})
-        # ======================================================================
 
         min_dt, max_dt = daily['BALANCE_DATE'].min(), daily['BALANCE_DATE'].max()
         max_dt_extended = max_dt + timedelta(days=7)
@@ -400,7 +375,6 @@ class YoutapSettlementEngine:
 
         final['BALANCE_DATE_PLUS1'] = final['BALANCE_DATE'].apply(lambda d: d + timedelta(days=1))
 
-        # Gabung dengan data created_date (OPS_DATE)
         final = final.merge(
             df_ops_clean[['ACCOUNT_ID','OPS_DATE','BALANCE']],
             left_on=['ACCOUNT_ID','BALANCE_DATE_PLUS1'],
@@ -413,7 +387,6 @@ class YoutapSettlementEngine:
         final['BALANCE'] = final['BALANCE'].fillna(0.0)
         final['MDR_RATE'] = final.groupby('ACCOUNT_ID')['MDR_RATE'].ffill().bfill().fillna(0.007)
 
-        # Merge TRX_00 harian
         df_trx00['TRX_DATE_PLUS1'] = df_trx00['TRX_DATE_ONLY'].apply(lambda d: d + timedelta(days=1))
         final = final.merge(df_trx00,
                             left_on=['ACCOUNT_ID','BALANCE_DATE_PLUS1'],
@@ -422,7 +395,6 @@ class YoutapSettlementEngine:
         final['TRX_00_AMT'] = pd.to_numeric(final['TRX_00_AMT'], errors='coerce').fillna(0.0)
         final['BALANCE'] = final['BALANCE'] + final['TRX_00_AMT']
 
-        # Mendapatkan tanggal hari kerja terakhir untuk menarik carry over libur
         final['LAST_WORKING_DAY'] = final['BALANCE_DATE_PLUS1'].apply(lambda d: self._get_last_working_day(d))
 
         final = final.merge(df_trx_holiday,
@@ -474,12 +446,7 @@ class YoutapSettlementEngine:
                 if is_biz and ember_acc != 0:
                     diff_emit = (row['BALANCE_ADJ'] - ember_vouch) - ember_acc
 
-                    # ==============================================================
-                    # LOGIKA DINAMIS MENCARI SALDO HARI KERJA SEBELUMNYA
-                    # ==============================================================
-                    # Jika hari sebelumnya bukan hari kerja (berarti ini hari pertama setelah libur)
                     if not self._is_settlement_day(settle_date - timedelta(days=1)):
-                        # Cari tanggal ops_balance pada hari kerja terakhir tersebut
                         last_work_date = self._get_last_working_day(settle_date)
                         match = group[group['BALANCE_DATE_PLUS1'] == last_work_date]
 
@@ -540,7 +507,6 @@ class YoutapSettlementEngine:
             return pd.DataFrame()
 
         result_df = pd.DataFrame(processed).merge(df_bank, on='ACCOUNT_ID', how='left')
-        
         result_df = result_df.merge(not_match_agg, left_on=['ACCOUNT_ID', 'BALANCE_DATE'], right_on=['ACCOUNT_ID', 'BALANCE_DATE'], how='left')
         
         for c in ['TOTAL_TRAFFIC_NOT_MATCH', 'TOTAL_GROSS_TRANSACTION_NOT_MATCH', 'TOTAL_MDR_NOT_MATCH', 'TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH']:
@@ -589,44 +555,51 @@ class YoutapSettlementEngine:
 # EXECUTION
 # ==============================================================================
 print("⏳ Menarik Data dari BigQuery...")
-print("  📥 Query: DATA_YTI_BASE (settlement + recon joins)...")
 df_b = client.query(QUERY_SETTLE).to_dataframe()
-print(f"    → {len(df_b)} rows")
-
-print("  📥 Query: Voucher data...")
 df_v = client.query(QUERY_VOUCHER).to_dataframe()
-print(f"    → {len(df_v)} rows")
-
-print("  📥 Query: Bank accounts...")
 df_k = client.query(QUERY_BANK).to_dataframe()
-print(f"    → {len(df_k)} rows")
-
-print("  📥 Query: OPS Balance...")
 df_o = client.query(QUERY_OPS).to_dataframe()
-print(f"    → {len(df_o)} rows")
-
-print("  📥 Query: FIRST_TRX (dari DATA_YTI_BASE)...")
 df_ft_bq = client.query(QUERY_FIRST_TRX).to_dataframe()
-print(f"    → {len(df_ft_bq)} rows")
-
-print("  📥 Query: TRX_00 (hanya Senin-Jumat)...")
 df_trx00_bq = client.query(QUERY_TRX_00).to_dataframe()
-print(f"    → {len(df_trx00_bq)} rows")
 
 print("\n⏳ Memproses Settlement V15.6...")
 engine = YoutapSettlementEngine(year=2026)
 df_final = engine.run_process(df_b, df_v, df_k, df_o, df_ft_bq, df_trx00_bq)
 
 if not df_final.empty:
-    from google.colab import files
-    file_name = f"Settlement_Master_V15_6_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-    df_final.to_csv(file_name, index=False)
-    files.download(file_name)
-    print(f"\n✅ BERHASIL! File: {file_name}")
-    print(f"   Total rows: {len(df_final)}")
+    print(f"✅ Data diproses! Total baris: {len(df_final)}")
     confirm_count = (df_final['CONFIRM_TO_TRANSFER'] == 'CONFIRM').sum()
     not_match_count = (df_final['CONFIRM_TO_TRANSFER'] == 'NOT MATCH').sum()
     min_count = (df_final['CONFIRM_TO_TRANSFER'] == 'MINIMUM NOT MET').sum()
     print(f"   CONFIRM: {confirm_count} | NOT MATCH: {not_match_count} | MINIMUM NOT MET: {min_count}")
+    
+    # ==========================================================================
+    # UPLOAD & REPLACE DATA KE BIGQUERY (14 Hari Terakhir)
+    # ==========================================================================
+    print("\n⏳ Mengunggah data ke BigQuery...")
+    table_id = f"{PROJECT_ID}.summary.settlement_report"
+    
+    today_date = datetime.now().date()
+    start_date = today_date - timedelta(days=14)
+    
+    # 1. Hapus data lama agar tidak duplikat
+    delete_query = f"""
+        DELETE FROM `{table_id}`
+        WHERE DATE(BALANCE_DATE) >= '{start_date}' AND DATE(BALANCE_DATE) <= '{today_date}'
+    """
+    try:
+        client.query(delete_query).result()
+        print("   ✓ Pembersihan data lama selesai.")
+    except Exception as e:
+        print(f"   ⚠️ Tabel mungkin baru dibuat atau error ringan: {e}")
+
+    # 2. Upload Data Baru
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    try:
+        job = client.load_table_from_dataframe(df_final, table_id, job_config=job_config)
+        job.result()
+        print(f"✅ BERHASIL! {job.output_rows} baris telah tersimpan di BigQuery ({table_id})")
+    except Exception as e:
+        print(f"❌ GAGAL mengunggah ke BigQuery. Error: {e}")
 else:
-    print("⚠️ Data tidak ditemukan.")
+    print("⚠️ Data kosong, tidak ada yang diunggah.")
