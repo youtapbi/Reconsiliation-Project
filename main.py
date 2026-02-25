@@ -1,13 +1,13 @@
 import pandas as pd
 import numpy as np
 import holidays
+import io
 from datetime import timedelta, datetime, time as dtime
 from google.cloud import bigquery
-import os
 
 pd.set_option('future.no_silent_downcasting', True)
 
-print("⏳ Memulai Proses Settlement Otomatis...")
+print("⏳ Memulai Otomatisasi Settlement...")
 PROJECT_ID = 'youtap-indonesia-bi'
 client = bigquery.Client(project=PROJECT_ID)
 
@@ -140,7 +140,7 @@ DATA_YTI_BASE AS (
       AND sm.vendor_id != 1602
       AND sm.account_id NOT IN (367540, 367620, 287527)
 )
-SELECT * FROM DATA_YTI_BASE 
+SELECT * FROM DATA_YTI_BASE
 """
 
 QUERY_VOUCHER = """
@@ -251,7 +251,7 @@ class YoutapSettlementEngine:
             self.id_hols[d] = "Libur Nasional"
 
     def _is_settlement_day(self, settle_date):
-        if settle_date.weekday() >= 5:  # Sabtu, Minggu
+        if settle_date.weekday() >= 5:
             return False
         if settle_date in self.id_hols:
             return False
@@ -279,17 +279,16 @@ class YoutapSettlementEngine:
         ].copy()
 
         df_unmatched = df_base[df_base['KEY_JOIN_ISSUER'].isna()].copy()
-        
         df_unmatched['AMOUNT_BASE'] = pd.to_numeric(df_unmatched['AMOUNT_BASE'], errors='coerce').fillna(0.0)
         df_unmatched['MDR_RATE'] = pd.to_numeric(df_unmatched['MDR_RATE'], errors='coerce').fillna(0.007)
         df_unmatched['TXN_DATE'] = pd.to_datetime(df_unmatched['TXN_DATE'])
         df_unmatched['BALANCE_DATE'] = df_unmatched['TXN_DATE'].dt.date
         df_unmatched['MDR_AMT'] = df_unmatched['AMOUNT_BASE'] * df_unmatched['MDR_RATE']
         df_unmatched['NET_AMT'] = df_unmatched['AMOUNT_BASE'] - df_unmatched['MDR_AMT']
-        
+
         today_date = datetime.now().date()
         df_unmatched = df_unmatched[df_unmatched['BALANCE_DATE'] < today_date]
-        
+
         not_match_agg = df_unmatched.groupby(['ACCOUNT_ID', 'BALANCE_DATE']).agg(
             TOTAL_TRAFFIC_NOT_MATCH=('CREDIT_TRANS_TRX_ID', 'nunique'),
             TOTAL_GROSS_TRANSACTION_NOT_MATCH=('AMOUNT_BASE', 'sum'),
@@ -298,13 +297,11 @@ class YoutapSettlementEngine:
         ).reset_index()
         not_match_agg['TOTAL_MDR_NOT_MATCH'] = not_match_agg['TOTAL_MDR_NOT_MATCH'].round()
         not_match_agg['TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH'] = not_match_agg['TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH'].round()
-        
-        df_base = df_base[df_base['KEY_JOIN_ISSUER'].notna()].copy()
 
+        df_base = df_base[df_base['KEY_JOIN_ISSUER'].notna()].copy()
         df_base['AMOUNT_BASE'] = pd.to_numeric(df_base['AMOUNT_BASE'], errors='coerce').fillna(0.0)
         df_base['MDR_RATE'] = pd.to_numeric(df_base['MDR_RATE'], errors='coerce').fillna(0.007)
         df_base['TXN_DATE'] = pd.to_datetime(df_base['TXN_DATE'])
-
         df_base['TRX_DATE'] = df_base['TXN_DATE'].dt.date
         df_base['BALANCE_DATE'] = df_base['TRX_DATE']
 
@@ -349,12 +346,12 @@ class YoutapSettlementEngine:
         df_trx_holiday = df_base[
             (df_base['TXN_TIME_WIB'] <= dtime(0, 1, 0))
         ].copy()
-        
+
         holiday_carry_dates = []
         for d in df_trx_holiday['TRX_DATE_ONLY'].unique():
             if self._is_settlement_day(d) and not self._is_settlement_day(d + timedelta(days=1)):
                 holiday_carry_dates.append(d)
-                
+
         df_trx_holiday = df_trx_holiday[df_trx_holiday['TRX_DATE_ONLY'].isin(holiday_carry_dates)]
         df_trx_holiday = df_trx_holiday.groupby(['ACCOUNT_ID','TRX_DATE_ONLY'])['AMOUNT_BASE'].sum().reset_index()
         df_trx_holiday = df_trx_holiday.rename(columns={'AMOUNT_BASE': 'TRX_HOLIDAY_CARRY_AMT'})
@@ -382,7 +379,6 @@ class YoutapSettlementEngine:
         )
 
         final['BALANCE_RAW'] = final['BALANCE']
-
         final = final.sort_values(['ACCOUNT_ID','BALANCE_DATE'])
         final['BALANCE'] = final['BALANCE'].fillna(0.0)
         final['MDR_RATE'] = final.groupby('ACCOUNT_ID')['MDR_RATE'].ffill().bfill().fillna(0.007)
@@ -391,7 +387,7 @@ class YoutapSettlementEngine:
         final = final.merge(df_trx00,
                             left_on=['ACCOUNT_ID','BALANCE_DATE_PLUS1'],
                             right_on=['ACCOUNT_ID','TRX_DATE_PLUS1'], how='left')
-        
+
         final['TRX_00_AMT'] = pd.to_numeric(final['TRX_00_AMT'], errors='coerce').fillna(0.0)
         final['BALANCE'] = final['BALANCE'] + final['TRX_00_AMT']
 
@@ -407,10 +403,10 @@ class YoutapSettlementEngine:
             left_on=['ACCOUNT_ID','BALANCE_DATE_PLUS1'],
             right_on=['ACCOUNT_ID','FT_TRX_DATE'], how='left'
         )
-        
+
         for c in ['FIRST_TRX','AMOUNT_VOUCHER','AMOUNT_BASE','TRX_HOLIDAY_CARRY_AMT']:
             final[c] = pd.to_numeric(final[c], errors='coerce').fillna(0.0)
-            
+
         final.drop(columns=['FT_TRX_DATE', 'TRX_DATE_ONLY'], inplace=True, errors='ignore')
 
         final['BALANCE_ADJ'] = final['BALANCE'] + final['TRX_HOLIDAY_CARRY_AMT']
@@ -508,7 +504,7 @@ class YoutapSettlementEngine:
 
         result_df = pd.DataFrame(processed).merge(df_bank, on='ACCOUNT_ID', how='left')
         result_df = result_df.merge(not_match_agg, left_on=['ACCOUNT_ID', 'BALANCE_DATE'], right_on=['ACCOUNT_ID', 'BALANCE_DATE'], how='left')
-        
+
         for c in ['TOTAL_TRAFFIC_NOT_MATCH', 'TOTAL_GROSS_TRANSACTION_NOT_MATCH', 'TOTAL_MDR_NOT_MATCH', 'TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH']:
             result_df[c] = pd.to_numeric(result_df[c], errors='coerce').fillna(0.0)
 
@@ -533,9 +529,6 @@ class YoutapSettlementEngine:
 
         result_df = result_df.sort_values(by=['BALANCE_DATE','ACCOUNT_ID'], ascending=[False, True])
 
-        # ==============================================================================
-        # FILTER 14 HARI TERAKHIR DI TERAPKAN DI SINI
-        # ==============================================================================
         start_date = today_date - timedelta(days=14)
         result_df = result_df[(result_df['BALANCE_DATE'] >= start_date) & (result_df['BALANCE_DATE'] <= today_date)]
 
@@ -574,7 +567,7 @@ if not df_final.empty:
     print(f"   CONFIRM: {confirm_count} | NOT MATCH: {not_match_count} | MINIMUM NOT MET: {min_count}")
     
     # ==========================================================================
-    # UPLOAD & REPLACE DATA KE BIGQUERY (14 Hari Terakhir)
+    # UPLOAD & REPLACE DATA KE BIGQUERY (Metode Aman CSV In-Memory)
     # ==========================================================================
     print("\n⏳ Mengunggah data ke BigQuery...")
     table_id = f"{PROJECT_ID}.summary.settlement_report"
@@ -589,17 +582,36 @@ if not df_final.empty:
     """
     try:
         client.query(delete_query).result()
-        print("   ✓ Pembersihan data lama selesai.")
+        print(f"   ✓ Pembersihan data lama ({start_date} s/d {today_date}) selesai.")
     except Exception as e:
-        print(f"   ⚠️ Tabel mungkin baru dibuat atau error ringan: {e}")
+        if "404" in str(e) or "Not found" in str(e):
+            print("   ✓ Info: Tabel belum ada, akan dibangun otomatis dari awal.")
+        else:
+            print(f"   ⚠️ Peringatan saat pembersihan data lama: {e}")
 
-    # 2. Upload Data Baru
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    # 2. Persiapan Data (Bypass PyArrow)
+    print("   ✓ Mempersiapkan bypass PyArrow dan sinkronisasi tipe data...")
+    df_final['BALANCE_DATE'] = pd.to_datetime(df_final['BALANCE_DATE']).dt.date
+    df_final['ACCOUNT_ID'] = pd.to_numeric(df_final['ACCOUNT_ID'], errors='coerce').fillna(0).astype('int64').astype(str)
+    
+    csv_file = io.StringIO()
+    df_final.to_csv(csv_file, index=False)
+    csv_file.seek(0) 
+
+    # 3. Upload Data Baru
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_APPEND",
+        source_format=bigquery.SourceFormat.CSV,
+        skip_leading_rows=1, 
+        autodetect=True,
+    )
+    
     try:
-        job = client.load_table_from_dataframe(df_final, table_id, job_config=job_config)
+        job = client.load_table_from_file(csv_file, table_id, job_config=job_config)
         job.result()
         print(f"✅ BERHASIL! {job.output_rows} baris telah tersimpan di BigQuery ({table_id})")
     except Exception as e:
         print(f"❌ GAGAL mengunggah ke BigQuery. Error: {e}")
+
 else:
-    print("⚠️ Data kosong, tidak ada yang diunggah.")
+    print("⚠️ Data tidak ditemukan.")
