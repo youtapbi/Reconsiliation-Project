@@ -2,9 +2,13 @@ name: Automated Settlement Master V15.6
 
 on:
   schedule:
-    # Berjalan jam 01:15 UTC (08:15 WIB) dan 02:15 UTC (09:15 WIB) setiap hari
-    - cron: '15 1,2 * * *'
-  workflow_dispatch: # Tombol manual agar Bapak bisa langsung test run
+    # 08:15 WIB = 01:15 UTC
+    - cron: '15 1 * * 1-5'
+    # 09:15 WIB = 02:15 UTC
+    - cron: '15 2 * * 1-5'
+    # 10:15 WIB = 03:15 UTC
+    - cron: '15 3 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   build:
