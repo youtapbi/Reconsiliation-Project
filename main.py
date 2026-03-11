@@ -1,3 +1,8 @@
+# ==============================================================================
+# SCRIPT SETTLEMENT MASTER - VERSION 15.8 (GitHub Actions)
+# Dikonversi dari Google Colab ke GitHub Actions Automation
+# ==============================================================================
+
 import pandas as pd
 import numpy as np
 import holidays
@@ -239,7 +244,7 @@ GROUP BY 1, 2
 """
 
 # ==============================================================================
-# STEPS 3-6: SETTLEMENT ENGINE V15.6
+# STEPS 3-6: SETTLEMENT ENGINE V15.8
 # ==============================================================================
 class YoutapSettlementEngine:
 
@@ -268,7 +273,9 @@ class YoutapSettlementEngine:
         for df in [df_base, df_voucher, df_ops, df_bank, df_first_trx, df_trx00_bq]:
             df.columns = [c.upper() for c in df.columns]
 
-        df_base = df_base.drop_duplicates(subset=['CREDIT_TRANS_TRX_ID']).copy()
+        # FIX BUG OKASAN JUICE: Hapus duplikat berdasarkan ID Akun + ID Transaksi
+        df_base = df_base.drop_duplicates(subset=['ACCOUNT_ID', 'CREDIT_TRANS_TRX_ID']).copy()
+
         df_bank = df_bank.sort_values(['ACCOUNT_ID','BANK_NAME']).drop_duplicates(
             subset=['ACCOUNT_ID'], keep='first'
         )
@@ -278,32 +285,22 @@ class YoutapSettlementEngine:
             (df_base['REFERRAL_CODE_ACQUISITION'].isna())
         ].copy()
 
-        df_unmatched = df_base[df_base['KEY_JOIN_ISSUER'].isna()].copy()
-        df_unmatched['AMOUNT_BASE'] = pd.to_numeric(df_unmatched['AMOUNT_BASE'], errors='coerce').fillna(0.0)
-        df_unmatched['MDR_RATE'] = pd.to_numeric(df_unmatched['MDR_RATE'], errors='coerce').fillna(0.007)
-        df_unmatched['TXN_DATE'] = pd.to_datetime(df_unmatched['TXN_DATE'])
-        df_unmatched['BALANCE_DATE'] = df_unmatched['TXN_DATE'].dt.date
-        df_unmatched['MDR_AMT'] = df_unmatched['AMOUNT_BASE'] * df_unmatched['MDR_RATE']
-        df_unmatched['NET_AMT'] = df_unmatched['AMOUNT_BASE'] - df_unmatched['MDR_AMT']
-
-        today_date = datetime.now().date()
-        df_unmatched = df_unmatched[df_unmatched['BALANCE_DATE'] < today_date]
-
-        not_match_agg = df_unmatched.groupby(['ACCOUNT_ID', 'BALANCE_DATE']).agg(
-            TOTAL_TRAFFIC_NOT_MATCH=('CREDIT_TRANS_TRX_ID', 'nunique'),
-            TOTAL_GROSS_TRANSACTION_NOT_MATCH=('AMOUNT_BASE', 'sum'),
-            TOTAL_MDR_NOT_MATCH=('MDR_AMT', 'sum'),
-            TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH=('NET_AMT', 'sum')
-        ).reset_index()
-        not_match_agg['TOTAL_MDR_NOT_MATCH'] = not_match_agg['TOTAL_MDR_NOT_MATCH'].round()
-        not_match_agg['TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH'] = not_match_agg['TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH'].round()
-
-        df_base = df_base[df_base['KEY_JOIN_ISSUER'].notna()].copy()
         df_base['AMOUNT_BASE'] = pd.to_numeric(df_base['AMOUNT_BASE'], errors='coerce').fillna(0.0)
         df_base['MDR_RATE'] = pd.to_numeric(df_base['MDR_RATE'], errors='coerce').fillna(0.007)
         df_base['TXN_DATE'] = pd.to_datetime(df_base['TXN_DATE'])
         df_base['TRX_DATE'] = df_base['TXN_DATE'].dt.date
         df_base['BALANCE_DATE'] = df_base['TRX_DATE']
+
+        # ======================================================================
+        # FIX BUG WEEKEND (Versi 15.7: Integrated Unmatched Engine)
+        # ======================================================================
+        df_base['IS_MATCHED'] = df_base['KEY_JOIN_ISSUER'].notna()
+        df_base['AMT_MATCHED'] = np.where(df_base['IS_MATCHED'], df_base['AMOUNT_BASE'], 0.0)
+        df_base['AMT_UNMATCHED'] = np.where(~df_base['IS_MATCHED'], df_base['AMOUNT_BASE'], 0.0)
+        df_base['MDR_UNMATCHED'] = df_base['AMT_UNMATCHED'] * df_base['MDR_RATE']
+        df_base['NET_UNMATCHED'] = df_base['AMT_UNMATCHED'] - df_base['MDR_UNMATCHED']
+        df_base['TRAFFIC_UNMATCHED'] = np.where(~df_base['IS_MATCHED'], 1, 0)
+        # ======================================================================
 
         df_voucher['AMOUNT_BASE'] = pd.to_numeric(df_voucher['AMOUNT_BASE'], errors='coerce').fillna(0.0)
         df_voucher['TXN_DATE'] = pd.to_datetime(df_voucher['TXN_DATE'])
@@ -311,10 +308,15 @@ class YoutapSettlementEngine:
         vouch_agg = df_voucher.groupby(['ACCOUNT_ID','VOUCH_DATE'])['AMOUNT_BASE'].sum().reset_index()
         vouch_agg = vouch_agg.rename(columns={'AMOUNT_BASE': 'AMOUNT_VOUCHER', 'VOUCH_DATE': 'BALANCE_DATE'})
 
+        # Agregasi Utama: Match dan Unmatch dihitung secara paralel
         daily = df_base.groupby(['ACCOUNT_ID','BALANCE_DATE']).agg(
-            AMOUNT_BASE=('AMOUNT_BASE','sum'),
+            AMOUNT_BASE=('AMT_MATCHED','sum'),
             MDR_RATE=('MDR_RATE','max'),
-            MERCH_NAME=('MERCH_NAME','first')
+            MERCH_NAME=('MERCH_NAME','first'),
+            UNMATCHED_AMOUNT=('AMT_UNMATCHED', 'sum'),
+            UNMATCHED_MDR=('MDR_UNMATCHED', 'sum'),
+            UNMATCHED_NET=('NET_UNMATCHED', 'sum'),
+            UNMATCHED_TRAFFIC=('TRAFFIC_UNMATCHED', 'sum')
         ).reset_index()
 
         daily = daily.merge(vouch_agg, on=['ACCOUNT_ID','BALANCE_DATE'], how='left')
@@ -353,8 +355,8 @@ class YoutapSettlementEngine:
                 holiday_carry_dates.append(d)
 
         df_trx_holiday = df_trx_holiday[df_trx_holiday['TRX_DATE_ONLY'].isin(holiday_carry_dates)]
-        df_trx_holiday = df_trx_holiday.groupby(['ACCOUNT_ID','TRX_DATE_ONLY'])['AMOUNT_BASE'].sum().reset_index()
-        df_trx_holiday = df_trx_holiday.rename(columns={'AMOUNT_BASE': 'TRX_HOLIDAY_CARRY_AMT'})
+        df_trx_holiday = df_trx_holiday.groupby(['ACCOUNT_ID','TRX_DATE_ONLY'])['AMT_MATCHED'].sum().reset_index()
+        df_trx_holiday = df_trx_holiday.rename(columns={'AMT_MATCHED': 'TRX_HOLIDAY_CARRY_AMT'})
 
         min_dt, max_dt = daily['BALANCE_DATE'].min(), daily['BALANCE_DATE'].max()
         max_dt_extended = max_dt + timedelta(days=7)
@@ -404,27 +406,23 @@ class YoutapSettlementEngine:
             right_on=['ACCOUNT_ID','FT_TRX_DATE'], how='left'
         )
 
-        for c in ['FIRST_TRX','AMOUNT_VOUCHER','AMOUNT_BASE','TRX_HOLIDAY_CARRY_AMT']:
+        for c in ['FIRST_TRX','AMOUNT_VOUCHER','AMOUNT_BASE','TRX_HOLIDAY_CARRY_AMT',
+                  'UNMATCHED_AMOUNT', 'UNMATCHED_MDR', 'UNMATCHED_NET', 'UNMATCHED_TRAFFIC']:
             final[c] = pd.to_numeric(final[c], errors='coerce').fillna(0.0)
 
         final.drop(columns=['FT_TRX_DATE', 'TRX_DATE_ONLY'], inplace=True, errors='ignore')
 
         final['BALANCE_ADJ'] = final['BALANCE'] + final['TRX_HOLIDAY_CARRY_AMT']
 
-        final['TOTAL_GROSS_BALANCE'] = np.where(
-            np.isclose(final['BALANCE_ADJ'] - final['AMOUNT_BASE'],
-                       final['FIRST_TRX'], atol=1.0),
-            final['BALANCE_ADJ'] - final['FIRST_TRX'],
-            final['BALANCE_ADJ']
-        )
-        final['BALANCE_FINAL'] = final['TOTAL_GROSS_BALANCE'] - final['AMOUNT_VOUCHER']
-        final['GROSS_DIFFERENCE'] = final['BALANCE_ADJ'] - final['AMOUNT_BASE']
-
         processed = []
         for acc_id, group in final.groupby('ACCOUNT_ID'):
             ember_acc = 0.0
             ember_vouch = 0.0
             ember_ft = 0.0
+            ember_unm_amt = 0.0
+            ember_unm_mdr = 0.0
+            ember_unm_net = 0.0
+            ember_unm_traf = 0.0
             first_b_date_in_batch = None
 
             for _, row in group.iterrows():
@@ -432,14 +430,19 @@ class YoutapSettlementEngine:
                 settle_date = b_date + timedelta(days=1)
                 is_biz = self._is_settlement_day(settle_date)
 
-                if row['AMOUNT_BASE'] != 0 and first_b_date_in_batch is None:
+                if (row['AMOUNT_BASE'] != 0 or row['UNMATCHED_AMOUNT'] != 0) and first_b_date_in_batch is None:
                     first_b_date_in_batch = b_date
 
                 ember_acc += row['AMOUNT_BASE']
                 ember_vouch += row['AMOUNT_VOUCHER']
                 ember_ft += row['FIRST_TRX']
 
-                if is_biz and ember_acc != 0:
+                ember_unm_amt += row['UNMATCHED_AMOUNT']
+                ember_unm_mdr += row['UNMATCHED_MDR']
+                ember_unm_net += row['UNMATCHED_NET']
+                ember_unm_traf += row['UNMATCHED_TRAFFIC']
+
+                if is_biz and (ember_acc != 0 or ember_unm_amt != 0):
                     diff_emit = (row['BALANCE_ADJ'] - ember_vouch) - ember_acc
 
                     if not self._is_settlement_day(settle_date - timedelta(days=1)):
@@ -471,9 +474,12 @@ class YoutapSettlementEngine:
                     total_mdr = amount_final * row['MDR_RATE']
                     net_est = amount_final - total_mdr
 
+                    tot_gross_bal = (row['BALANCE_ADJ'] - ember_ft) if np.isclose(row['BALANCE_ADJ'] - ember_acc, ember_ft, atol=1.0) and ember_ft > 0 else row['BALANCE_ADJ']
+                    bal_final = tot_gross_bal - ember_vouch
+
                     if net_est < 20140:
                         confirm = 'MINIMUM NOT MET'
-                    elif abs(amount_final - row['BALANCE_FINAL']) > 1:
+                    elif abs(amount_final - bal_final) > 1:
                         confirm = 'NOT MATCH'
                     else:
                         confirm = 'CONFIRM'
@@ -484,51 +490,39 @@ class YoutapSettlementEngine:
                         'CARRY_OVER_BALANCE': emit_carry,
                         'FIRST_TRX': ember_ft,
                         'TOTAL_GROSS_TRANSACTION': ember_acc,
-                        'GROSS_DIFFERENCE': ember_acc - row['TOTAL_GROSS_BALANCE'],
+                        'TOTAL_GROSS_BALANCE': tot_gross_bal,
+                        'GROSS_DIFFERENCE': ember_acc - tot_gross_bal,
                         'AMOUNT_VOUCHER': ember_vouch,
                         'AMOUNT_FINAL': amount_final,
+                        'BALANCE_FINAL': bal_final,
                         'TOTAL_MDR': total_mdr,
                         'TOTAL_NET_TRX': net_est,
                         'AMOUNT_TO_TRANSFER': net_est,
                         'CONFIRM_TO_TRANSFER': confirm,
+                        'TOTAL_TRAFFIC_NOT_MATCH': ember_unm_traf,
+                        'TOTAL_GROSS_TRANSACTION_NOT_MATCH': ember_unm_amt,
+                        'TOTAL_MDR_NOT_MATCH': round(ember_unm_mdr),
+                        'TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH': round(ember_unm_net)
                     })
                     processed.append(res)
 
                     ember_acc = 0.0
                     ember_vouch = 0.0
                     ember_ft = 0.0
+                    ember_unm_amt = 0.0
+                    ember_unm_mdr = 0.0
+                    ember_unm_net = 0.0
+                    ember_unm_traf = 0.0
                     first_b_date_in_batch = None
 
         if not processed:
             return pd.DataFrame()
 
         result_df = pd.DataFrame(processed).merge(df_bank, on='ACCOUNT_ID', how='left')
-        result_df = result_df.merge(not_match_agg, left_on=['ACCOUNT_ID', 'BALANCE_DATE'], right_on=['ACCOUNT_ID', 'BALANCE_DATE'], how='left')
-
-        for c in ['TOTAL_TRAFFIC_NOT_MATCH', 'TOTAL_GROSS_TRANSACTION_NOT_MATCH', 'TOTAL_MDR_NOT_MATCH', 'TOTAL_AMOUNT_TO_TRANSFER_NOT_MATCH']:
-            result_df[c] = pd.to_numeric(result_df[c], errors='coerce').fillna(0.0)
-
-        result_df['TOTAL_GROSS_BALANCE'] = np.where(
-            np.isclose(
-                result_df['BALANCE_ADJ'] - result_df['TOTAL_GROSS_TRANSACTION'],
-                result_df['FIRST_TRX'], atol=1.0
-            ) & (result_df['FIRST_TRX'] > 0),
-            result_df['BALANCE_ADJ'] - result_df['FIRST_TRX'],
-            result_df['BALANCE_ADJ']
-        )
-        result_df['GROSS_DIFFERENCE'] = result_df['TOTAL_GROSS_TRANSACTION'] - result_df['TOTAL_GROSS_BALANCE']
-        result_df['BALANCE_FINAL'] = result_df['TOTAL_GROSS_BALANCE'] - result_df['AMOUNT_VOUCHER']
-
-        result_df['CONFIRM_TO_TRANSFER'] = np.where(
-            result_df['TOTAL_NET_TRX'] < 20140, 'MINIMUM NOT MET',
-            np.where(
-                abs(result_df['AMOUNT_FINAL'] - result_df['BALANCE_FINAL']) > 1,
-                'NOT MATCH', 'CONFIRM'
-            )
-        )
 
         result_df = result_df.sort_values(by=['BALANCE_DATE','ACCOUNT_ID'], ascending=[False, True])
 
+        today_date = datetime.now().date()
         start_date = today_date - timedelta(days=14)
         result_df = result_df[(result_df['BALANCE_DATE'] >= start_date) & (result_df['BALANCE_DATE'] <= today_date)]
 
@@ -548,14 +542,31 @@ class YoutapSettlementEngine:
 # EXECUTION
 # ==============================================================================
 print("⏳ Menarik Data dari BigQuery...")
-df_b = client.query(QUERY_SETTLE).to_dataframe()
-df_v = client.query(QUERY_VOUCHER).to_dataframe()
-df_k = client.query(QUERY_BANK).to_dataframe()
-df_o = client.query(QUERY_OPS).to_dataframe()
-df_ft_bq = client.query(QUERY_FIRST_TRX).to_dataframe()
-df_trx00_bq = client.query(QUERY_TRX_00).to_dataframe()
+print("  📥 Query: DATA_YTI_BASE (settlement + recon joins)...")
+df_b = client.query(QUERY_SETTLE).to_dataframe(create_bqstorage_client=False)
+print(f"    → {len(df_b)} rows")
 
-print("\n⏳ Memproses Settlement V15.6...")
+print("  📥 Query: Voucher data...")
+df_v = client.query(QUERY_VOUCHER).to_dataframe(create_bqstorage_client=False)
+print(f"    → {len(df_v)} rows")
+
+print("  📥 Query: Bank accounts...")
+df_k = client.query(QUERY_BANK).to_dataframe(create_bqstorage_client=False)
+print(f"    → {len(df_k)} rows")
+
+print("  📥 Query: OPS Balance...")
+df_o = client.query(QUERY_OPS).to_dataframe(create_bqstorage_client=False)
+print(f"    → {len(df_o)} rows")
+
+print("  📥 Query: FIRST_TRX (dari DATA_YTI_BASE)...")
+df_ft_bq = client.query(QUERY_FIRST_TRX).to_dataframe(create_bqstorage_client=False)
+print(f"    → {len(df_ft_bq)} rows")
+
+print("  📥 Query: TRX_00 (hanya Senin-Jumat)...")
+df_trx00_bq = client.query(QUERY_TRX_00).to_dataframe(create_bqstorage_client=False)
+print(f"    → {len(df_trx00_bq)} rows")
+
+print("\n⏳ Memproses Settlement V15.8...")
 engine = YoutapSettlementEngine(year=2026)
 df_final = engine.run_process(df_b, df_v, df_k, df_o, df_ft_bq, df_trx00_bq)
 
@@ -565,16 +576,16 @@ if not df_final.empty:
     not_match_count = (df_final['CONFIRM_TO_TRANSFER'] == 'NOT MATCH').sum()
     min_count = (df_final['CONFIRM_TO_TRANSFER'] == 'MINIMUM NOT MET').sum()
     print(f"   CONFIRM: {confirm_count} | NOT MATCH: {not_match_count} | MINIMUM NOT MET: {min_count}")
-    
+
     # ==========================================================================
     # UPLOAD & REPLACE DATA KE BIGQUERY (Metode Aman CSV In-Memory)
     # ==========================================================================
     print("\n⏳ Mengunggah data ke BigQuery...")
     table_id = f"{PROJECT_ID}.summary.settlement_report"
-    
+
     today_date = datetime.now().date()
     start_date = today_date - timedelta(days=14)
-    
+
     # 1. Hapus data lama agar tidak duplikat
     delete_query = f"""
         DELETE FROM `{table_id}`
@@ -589,23 +600,24 @@ if not df_final.empty:
         else:
             print(f"   ⚠️ Peringatan saat pembersihan data lama: {e}")
 
-    # 2. Persiapan Data (Bypass PyArrow)
+    # 2. Persiapan Data (Bypass PyArrow dan sinkronisasi tipe data)
     print("   ✓ Mempersiapkan bypass PyArrow dan sinkronisasi tipe data...")
     df_final['BALANCE_DATE'] = pd.to_datetime(df_final['BALANCE_DATE']).dt.date
     df_final['ACCOUNT_ID'] = pd.to_numeric(df_final['ACCOUNT_ID'], errors='coerce').fillna(0).astype('int64').astype(str)
-    
+    df_final['BANK_ACCOUNT_NUMBER'] = df_final['BANK_ACCOUNT_NUMBER'].astype(str).str.replace(r'\.0$', '', regex=True).replace('nan', '')
+
     csv_file = io.StringIO()
     df_final.to_csv(csv_file, index=False)
-    csv_file.seek(0) 
+    csv_file.seek(0)
 
     # 3. Upload Data Baru
     job_config = bigquery.LoadJobConfig(
         write_disposition="WRITE_APPEND",
         source_format=bigquery.SourceFormat.CSV,
-        skip_leading_rows=1, 
-        autodetect=True,
+        skip_leading_rows=1,
+        autodetect=False,
     )
-    
+
     try:
         job = client.load_table_from_file(csv_file, table_id, job_config=job_config)
         job.result()
