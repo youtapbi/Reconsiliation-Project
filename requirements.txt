@@ -4,3 +4,5 @@ holidays
 google-cloud-bigquery
 google-auth
 db-dtypes
+google-cloud-bigquery-storage
+pyarrow
